@@ -26,10 +26,8 @@ import optparse
 import itertools
 import subprocess
 
-FILESDB = pisi.db.filesldb.FilesLDB()
 INSTALLDB = pisi.db.installdb.InstallDB()
 CONSTANTS = pisi.constants.Constants()
-CMPFILTR = re.compile("(.*?)(\s*\((base|devel)\)\s*)$")
 
 def process_ldd(objdump_needed, ldd_output, ldd_unused, ldd_undefined):
     '''Process the ldd outputs. And return a simple path only lists'''
@@ -39,11 +37,11 @@ def process_ldd(objdump_needed, ldd_output, ldd_unused, ldd_undefined):
     result_main_ldd = {}
     result_needed = []
 
-    for line in ldd_unused.replace("\t", "").split("\n"):
+    for line in ldd_unused.decode().replace("\t", "").split("\n"):
         if not line == "" and not "Unused" in line:
             result_unused.append(line.strip())
 
-    for line in ldd_undefined.replace("\t", "").split("\n"):
+    for line in ldd_undefined.decode().replace("\t", "").split("\n"):
         if line.startswith("undefined symbol:"):
             result_undefined.append(re.sub("^undefined symbol: (.*)\((.*)\)$", "\\1", line))
 
@@ -63,7 +61,7 @@ def process_ldd(objdump_needed, ldd_output, ldd_unused, ldd_undefined):
 
     for obj in objdump_needed:
         # Find the absolute path of libraries from their SONAME's
-        if result_main_ldd.has_key(obj):
+        if obj in result_main_ldd:
             result_needed.append(os.popen("readlink -f %s" % result_main_ldd[obj]).read().strip())
         else:
             result_needed.append(obj)
@@ -74,7 +72,6 @@ def process_ldd(objdump_needed, ldd_output, ldd_unused, ldd_undefined):
     # result_undefined = undefined symbol errors
     return (result_needed, result_broken, result_unused, result_undefined)
 
-found_objdump = []
 def check_objdump(processed_needed, package_elf_files, package_name):
     '''check the objdump needed libraries with the ldd libraries
        the libraries that are needed can be used for dependencies'''
@@ -88,18 +85,14 @@ def check_objdump(processed_needed, package_elf_files, package_name):
         else:
             # search for the package name (i.e: pisi sf /usr/lib/*.so )
             # the library may not exist, thus adding an exception is welcome
-            if objdump_needed.startswith("/"): objdump_needed = objdump_needed[1:]
-            if objdump_needed in found_objdump: continue
             try:
-                dependency_name = FILESDB.search_file(objdump_needed)[0][0]
-                found_objdump.extend([x.path for x in INSTALLDB.get_files(dependency_name).list])
+                dependency_name = pisi.api.search_file(objdump_needed)[0][0]
             except IndexError:
                 dependency_name = "broken"
                 #print "%s (probably broken dependency)" % needed
         result_needed.append((objdump_needed, dependency_name))
     return result_needed
 
-found_pc_files = []
 def check_pc_files(pc_file):
     '''check for .pc files created by pkgconfig and shipped with the package
        these .pc files have requirements tags that can be used for dependencies'''
@@ -108,14 +101,12 @@ def check_pc_files(pc_file):
             os.path.basename(pc_file).replace(".pc", "")).read().split("\n")[:-1])
 
     for require in requires:
-        require_file = "usr/share/pkgconfig/%s.pc" % require
+        require_file = "/usr/share/pkgconfig/%s.pc" % require
 
-        if not os.path.exists("/%s" % require_file):
-            require_file = "usr/lib/pkgconfig/%s.pc" % require
-        if require_file in found_pc_files: continue
+        if not os.path.exists(require_file):
+            require_file = "/usr/lib/pkgconfig/%s.pc" % require
         try:
-            dependency_name = FILESDB.search_file(require_file)[0][0]
-            found_pc_files.extend([x.path for x in INSTALLDB.get_files(dependency_name).list])
+            dependency_name = pisi.api.search_file(require_file)[0][0]
         except IndexError:
             dependency_name = "broken"
 
@@ -155,14 +146,10 @@ def check_intersections(result_dependencies, package_deps, package_name, systemb
     # dependencies tagged as broken or given itself are eliminated
     dependencies = set()
     result_deps = []
-    for elf_files, paths_and_deps in result_dependencies.items():
+    for elf_files, paths_and_deps in list(result_dependencies.items()):
         for data in paths_and_deps:
-            if not data[1] == "broken" and not data[1] == package_name and not data[1].replace("32-bit", "") == "glibc":
-                if (data[1].startswith("xorg-video-nvidia") or data[1].startswith("xorg-video-fglrx")) \
-                    and not (package_name.startswith("xorg-video-nvidia") or package_name.startswith("xorg-video-fglrx")):
-                    result_deps.append("mesa")
-                else:
-                    result_deps.append(data[1])
+            if not data[1] == "broken" and not data[1] == package_name:
+                result_deps.append(data[1])
 
     # remove packages that belong to system.base component
     # when -s is used, systembase is set to true
@@ -184,25 +171,24 @@ def check_intersections(result_dependencies, package_deps, package_name, systemb
         result_deps = list(set(result_deps))
 
     # remove packages that already are written in metadata.xml (runtime dependencies written in pspec.xml)
-    #result_section = list(set(result_deps) -  set(package_deps))
-    result_section = list(set([re.sub(CMPFILTR, r"\1", x) for x in result_deps]) - set([re.sub(CMPFILTR, r"\1", x) for x in package_deps]))
+    result_section = list(set(result_deps) -  set(package_deps))
 
     # create a sorted iteration object of the final results variables
     # the lists may have variable lengths, thus we fill the smallers one with empty strings.
     # at the end all the lists are in the same length. This makes it easy to print it like a table
-    #cmp_func = lambda x, y: len(x) - len(y)
-    cmp_func = lambda x, y: len(re.sub(CMPFILTR, r"\1", x)) - len(re.sub(CMPFILTR, r"\1", y))
-    result_lists = itertools.izip_longest(sorted(sorted(list(set(package_deps))), cmp=cmp_func),
-                                          sorted(sorted(result_deps), cmp=cmp_func),
-                                          sorted(sorted(result_section), cmp=cmp_func),
-                                          fillvalue="")
+    cmp_func = lambda x: len(x[2]) - len(x[1])
+    result_lists = itertools.zip_longest(
+        sorted(list(set(package_deps)), key=cmp_func),
+        sorted(result_deps, key=cmp_func),
+        sorted(result_section, key=cmp_func),
+        fillvalue=""
+    )
     return result_lists
 
 def output_result(package_name, package_dir):
     '''execute ldd on elf files and returns them'''
     #Initialize magic for using "file" in python
-    magic_db = magic.open(magic.MAGIC_NONE)
-    magic_db.load()
+    magic_db = magic.Magic()
 
     package_elf_files = []
 
@@ -218,10 +204,13 @@ def output_result(package_name, package_dir):
                 if fnmatch.fnmatch(file_name.path, "*/pkgconfig/*.pc")])
 
     for package_file in package_files:
-        package_file_info = magic_db.file(package_file) #Return file type
-        if re.search("LSB\s+shared object", package_file_info):
+        if os.path.isdir(package_file):
+            package_file_info = 'directory'
+        else:
+            package_file_info = magic_db.from_file(package_file) #Return file type
+        if "LSB shared object" in package_file_info:
             package_elf_files.append(os.path.realpath(package_file))
-        elif re.search("LSB\s+executable", package_file_info):
+        elif "LSB executable" in package_file_info:
             package_elf_files.append(package_file)
 
     #There maybe more than one elf file, check for each one
@@ -243,7 +232,7 @@ def output_result(package_name, package_dir):
         ldd_output = subprocess.Popen(["ldd", elf_file],
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT,
-                                      env = os.environ).communicate()[0].strip().split("\n")
+                                      env = os.environ).communicate()[0].decode().strip().split('\n')
 
         ldd_unused, ldd_undefined = subprocess.Popen(["ldd", "-u", "-r", elf_file],
                                                    stdout=subprocess.PIPE,
@@ -253,7 +242,7 @@ def output_result(package_name, package_dir):
         runpath  = subprocess.Popen(["chrpath", "-l", elf_file],
                                       stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT,
-                                      env = os.environ).communicate()[0].strip().split(": ")
+                                      env = os.environ).communicate()[0].decode().strip().split(": ")
 
         objdump_needed = [line.strip().split()[1] for line in \
                 os.popen("objdump -p \"%s\" | grep 'NEEDED'" % elf_file).readlines()]
@@ -368,7 +357,7 @@ def main(arg):
         # Check for a installed package in the system
         elif package in INSTALLDB.list_installed():
             if used_pisi:
-                print "You've checked for a pisi file before\nPlease do not check for a installed package and pisi file at the same time"
+                print("You've checked for a pisi file before\nPlease do not check for a installed package and pisi file at the same time")
                 sys.exit(1)
             else:
                 package_name = package
@@ -385,66 +374,66 @@ def main(arg):
                 print_results(result_broken, result_unused, result_undefined, result_lists, result_runpath, package_name, option)
 
         else:
-            print "Error: '%s' is not a valid .pisi file or an installed package\nPlease use -d <path> option for a directory" % package
+            print("Error: '%s' is not a valid .pisi file or an installed package\nPlease use -d <path> option for a directory" % package)
 
 def print_results(result_broken, result_unused, result_undefined, result_lists, result_runpath, package_name, option):
     '''Print the final results in fancy colors'''
 
     def print_header(title, nocolor, color):
-        print colorize("\n%s" % title, color , nocolor)
-        print colorize("%s" % (len(title) * '-'), color, nocolor)
+        print(colorize("\n%s" % title, color , nocolor))
+        print(colorize("%s" % (len(title) * '-'), color, nocolor))
 
     def print_unused(result_unused, result_broken):
         header_dumped = False
 
         # Mark broken libs
-        for elf_file, libs in result_unused.items():
-            result_unused[elf_file] = map(lambda x: ("%s (broken)" % x) if x in result_broken else x, libs)
+        for elf_file, libs in list(result_unused.items()):
+            result_unused[elf_file] = [("%s (broken)" % x) if x in result_broken else x for x in libs]
 
-        for elf_file, libs in result_unused.items():
+        for elf_file, libs in list(result_unused.items()):
             if libs:
                 if not header_dumped:
                     print_header("Unused direct dependency analysis", option.nocolor, 'green')
                     header_dumped = True
-                print colorize(elf_file, 'red', option.nocolor)
+                print(colorize(elf_file, 'red', option.nocolor))
                 for data in libs:
-                    print "  ", data
+                    print("  ", data)
 
     def print_undefined(result_undefined):
         header_dumped = False
-        for elf_file, libs in result_undefined.items():
+        for elf_file, libs in list(result_undefined.items()):
             if libs:
                 if not header_dumped:
                     print_header("Undefined symbol analysis", option.nocolor, 'green')
                     header_dumped = True
-                print colorize(elf_file, 'red', option.nocolor)
+                print(colorize(elf_file, 'red', option.nocolor))
                 for data in libs:
-                    print "  ", data
+                    print("  ", data)
 
     def print_runpath(result_runpath):
         header_dumped = False
-        for elf_file, libs in result_runpath.items():
+        for elf_file, libs in list(result_runpath.items()):
             if libs:
                 if "RPATH" in libs[1]:
                     if not header_dumped:
                         print_header("Runpath analysis", option.nocolor, 'green')
                         header_dumped = True
-                    print colorize(elf_file, 'red', option.nocolor)
-                    print "  ", libs[1]
+                    print(colorize(elf_file, 'red', option.nocolor))
+                    print("  ", libs[1])
 
     def print_dependencies(result_lists):
-        print colorize("\nWritten dependencies           Detected dependencies          Missing dependencies", 'green', option.nocolor)
-        print colorize("----------------------------------------------------------------------------------", 'green', option.nocolor)
+        print(colorize("\nWritten dependencies           Detected dependencies          Missing dependencies", 'green', option.nocolor))
+        print(colorize("----------------------------------------------------------------------------------", 'green', option.nocolor))
 
         for tuple_deps in result_lists:
             for deps in tuple_deps:
                 if "(base)" in deps:
-                    print "%s" % colorize(deps.ljust(30), 'red', option.nocolor),
+                    print("%s" % colorize(deps.ljust(30), 'red', option.nocolor), end=' ')
                 elif "(devel)" in deps:
-                    print "%s" % colorize(deps.ljust(30), 'yellow', option.nocolor),
+                    print("%s" % colorize(deps.ljust(30), 'yellow', option.nocolor), end=' ')
                 else:
-                    print deps.ljust(30),
-            print
+                    print(deps.ljust(30), end=' ')
+            print()
 
     def print_missing(result_lists, plain_list):
         if not plain_list:
@@ -453,9 +442,9 @@ def print_results(result_broken, result_unused, result_undefined, result_lists, 
         for tuple_deps in result_lists:
             pkg = tuple_deps[2]
             if "(base)" in pkg:
-                print "%s" % colorize(pkg, 'red', option.nocolor)
+                print("%s" % colorize(pkg, 'red', option.nocolor))
             elif pkg:
-                print pkg
+                print(pkg)
 
     if not option.plain_list:
         print_header("Package: %s" % package_name, option.nocolor, 'bold')
@@ -468,7 +457,6 @@ def print_results(result_broken, result_unused, result_undefined, result_lists, 
         print_unused(result_unused, result_broken)
         print_undefined(result_undefined)
         print_runpath(result_runpath)
-        #print set(result_lists)
         print_dependencies(result_lists)
 
     else:
@@ -577,4 +565,3 @@ def argument():
 if __name__ == "__main__":
     args = argument()
     sys.exit(main(args))
-
